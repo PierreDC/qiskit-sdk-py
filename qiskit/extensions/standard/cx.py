@@ -1,29 +1,22 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2017 IBM RESEARCH. All Rights Reserved.
+# Copyright 2017, IBM.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# =============================================================================
+# This source code is licensed under the Apache License, Version 2.0 found in
+# the LICENSE.txt file in the root directory of this source tree.
+
+# pylint: disable=invalid-name
 
 """
 controlled-NOT gate.
 """
-from qiskit import QuantumCircuit
 from qiskit import Gate
-from qiskit import CompositeGate
-from qiskit.extensions.standard import header
-from qiskit._quantumregister import QuantumRegister
+from qiskit import QuantumCircuit
 from qiskit._instructionset import InstructionSet
+from qiskit._quantumregister import QuantumRegister
+from qiskit.dagcircuit import DAGCircuit
+from qiskit.extensions.standard import header  # pylint: disable=unused-import
+from qiskit.extensions.standard.cxbase import CXBase
 
 
 class CnotGate(Gate):
@@ -31,39 +24,59 @@ class CnotGate(Gate):
 
     def __init__(self, ctl, tgt, circ=None):
         """Create new CNOT gate."""
-        super(CnotGate, self).__init__("cx", [], [ctl, tgt], circ)
+        super().__init__("cx", [], [ctl, tgt], circ)
+        self._define_decompositions()
 
-    def qasm(self):
-        """Return OPENQASM string."""
-        ctl = self.arg[0]
-        tgt = self.arg[1]
-        return self._qasmif("cx %s[%d],%s[%d];" % (ctl[0].name, ctl[1],
-                                                   tgt[0].name, tgt[1]))
+    def _define_decompositions(self):
+        """
+        gate cx c,t { CX c,t; }
+        """
+        decomposition = DAGCircuit()
+        q = QuantumRegister(2, "q")
+        decomposition.add_qreg(q)
+        decomposition.add_basis_element("CX", 2, 0, 0)
+        rule = [
+            CXBase(q[0], q[1])
+        ]
+        for inst in rule:
+            decomposition.apply_operation_back(inst)
+        self._decompositions = [decomposition]
 
     def inverse(self):
         """Invert this gate."""
+        self._define_decompositions()
         return self  # self-inverse
 
     def reapply(self, circ):
         """Reapply this gate to corresponding qubits in circ."""
-        self._modifiers(circ.cx(self.arg[0], self.arg[1]))
+        self._modifiers(circ.cx(self.qargs[0], self.qargs[1]))
 
 
 def cx(self, ctl, tgt):
-    """Apply CNOT from ctl to tgt."""
+    """Apply CX from ctl to tgt."""
     if isinstance(ctl, QuantumRegister) and \
        isinstance(tgt, QuantumRegister) and len(ctl) == len(tgt):
-        # apply cx to qubits between two registers
         instructions = InstructionSet()
         for i in range(ctl.size):
             instructions.add(self.cx((ctl, i), (tgt, i)))
         return instructions
-    else:
-        self._check_qubit(ctl)
-        self._check_qubit(tgt)
-        self._check_dups([ctl, tgt])
-        return self._attach(CnotGate(ctl, tgt, self))
+
+    if isinstance(ctl, QuantumRegister):
+        gs = InstructionSet()
+        for j in range(ctl.size):
+            gs.add(self.cx((ctl, j), tgt))
+        return gs
+
+    if isinstance(tgt, QuantumRegister):
+        gs = InstructionSet()
+        for j in range(tgt.size):
+            gs.add(self.cx(ctl, (tgt, j)))
+        return gs
+
+    self._check_qubit(ctl)
+    self._check_qubit(tgt)
+    self._check_dups([ctl, tgt])
+    return self._attach(CnotGate(ctl, tgt, self))
 
 
 QuantumCircuit.cx = cx
-CompositeGate.cx = cx

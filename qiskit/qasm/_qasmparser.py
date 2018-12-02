@@ -1,35 +1,29 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2017 IBM RESEARCH. All Rights Reserved.
+# Copyright 2017, IBM.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# =============================================================================
+# This source code is licensed under the Apache License, Version 2.0 found in
+# the LICENSE.txt file in the root directory of this source tree.
 
 """
 OPENQASM parser.
 """
-import math
+import os
+import shutil
 import tempfile
 
 import ply.yacc as yacc
+import sympy
 
-from ._qasmlexer import QasmLexer
-from ._qasmerror import QasmError
 from . import _node as node
+from ._qasmerror import QasmError
+from ._qasmlexer import QasmLexer
 
 
 class QasmParser(object):
     """OPENQASM Parser."""
+
+    # pylint: disable=unused-argument,missing-docstring,invalid-name
 
     def __init__(self, filename):
         """Create the parser."""
@@ -37,15 +31,29 @@ class QasmParser(object):
             filename = ""
         self.lexer = QasmLexer(filename)
         self.tokens = self.lexer.tokens
+        self.parse_dir = tempfile.mkdtemp(prefix='qiskit')
+        self.precedence = (
+            ('left', '+', '-'),
+            ('left', '*', '/'),
+            ('left', 'negative', 'positive'),
+            ('right', '^'))
         # For yacc, also, write_tables = Bool and optimize = Bool
-        parse_dir = tempfile.gettempdir()
-        self.parser = yacc.yacc(module=self, debug=False, outputdir=parse_dir)
+        self.parser = yacc.yacc(module=self, debug=False,
+                                outputdir=self.parse_dir)
         self.qasm = None
         self.parse_deb = False
         self.global_symtab = {}                          # global symtab
         self.current_symtab = self.global_symtab         # top of symbol stack
         self.symbols = []                                # symbol stack
-        self.external_functions = ['sin', 'cos', 'tan', 'exp', 'ln', 'sqrt']
+        self.external_functions = ['sin', 'cos', 'tan', 'exp', 'ln', 'sqrt',
+                                   'acos', 'atan', 'asin']
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        if os.path.exists(self.parse_dir):
+            shutil.rmtree(self.parse_dir)
 
     def update_symtab(self, obj):
         """Update a node in the symbol table.
@@ -61,7 +69,7 @@ class QasmParser(object):
             raise QasmError("Duplicate declaration for", obj.type + " '"
                             + obj.name + "' at line", str(obj.line)
                             + ', file', obj.file
-                            + '.\nPrevious occurence at line',
+                            + '.\nPrevious occurrence at line',
                             str(prev.line) + ', file', prev.file)
         self.current_symtab[obj.name] = obj
 
@@ -158,8 +166,9 @@ class QasmParser(object):
 
         if g_sym.type != object_type:
             raise QasmError("Type for '" + g_sym.name + "' should be '"
-                            + object_type + "' but was found to be '" + g_sym.type
-                            + "'", "line", str(obj.line), "file", obj.file)
+                            + object_type + "' but was found to be '"
+                            + g_sym.type + "'", "line", str(obj.line),
+                            "file", obj.file)
 
         if obj.type == 'indexed_id':
             bound = g_sym.index
@@ -180,7 +189,8 @@ class QasmParser(object):
 
     def id_tuple_list(self, id_node):
         """Return a list of (name, index) tuples for this id node."""
-        assert id_node.type == "id", "internal error, id_tuple_list"
+        if id_node.type != "id":
+            raise QasmError("internal error, id_tuple_list")
         bit_list = []
         try:
             g_sym = self.current_symtab[id_node.name]
@@ -234,7 +244,7 @@ class QasmParser(object):
                     line_number = child.line
                     filename = child.file
             else:
-                assert False, "internal error, verify_distinct"
+                raise QasmError("internal error, verify_distinct")
         if len(bit_list) != len(set(bit_list)):
             raise QasmError("duplicate identifiers at line %d file %s"
                             % (line_number, filename))
@@ -277,16 +287,16 @@ class QasmParser(object):
     # ----------------------------------------
     #  statement : decl
     #            | quantum_op ';'
-    #            | magic ';'
+    #            | format ';'
     # ----------------------------------------
     def p_statement(self, program):
         """
            statement : decl
                      | quantum_op ';'
-                     | magic ';'
+                     | format ';'
                      | ignore
                      | quantum_op error
-                     | magic error
+                     | format error
         """
         if len(program) > 2:
             if program[2] != ';':
@@ -294,18 +304,18 @@ class QasmParser(object):
                                 + "received", str(program[2].value))
         program[0] = program[1]
 
-    def p_magic(self, program):
+    def p_format(self, program):
         """
-           magic : MAGIC REAL
+           format : FORMAT
         """
-        program[0] = node.Magic([node.Real(program[2])])
+        program[0] = node.Format(program[1])
 
-    def p_magic_0(self, program):
+    def p_format_0(self, program):
         """
-           magic : MAGIC error
+           format : FORMAT error
         """
-        magic = "2.0;"
-        raise QasmError("Invalid magic string. Expected '" + magic
+        version = "2.0;"
+        raise QasmError("Invalid version string. Expected '" + version
                         + "'.  Is the semicolon missing?")
 
     # ----------------------------------------
@@ -441,8 +451,8 @@ class QasmParser(object):
         """
         if len(program) > 2:
             if program[2] != ';':
-                raise QasmError("Missing ';' in qreg or creg declaraton."
-                                + " Instead received '" + program[2].value + "'")
+                raise QasmError("Missing ';' in qreg or creg declaration."
+                                " Instead received '" + program[2].value + "'")
         program[0] = program[1]
 
     # ----------------------------------------
@@ -590,7 +600,7 @@ class QasmParser(object):
     #
     # unitary_op : U '(' exp_list ')'  primary
     #            | CX                  primary ',' primary
-    #            | id                  pirmary_list
+    #            | id                  primary_list
     #            | id '(' ')'          primary_list
     #            | id '(' exp_list ')' primary_list
     #
@@ -771,7 +781,7 @@ class QasmParser(object):
     #        | OPAQUE id gate_scope '(' ')'              bit_list
     #        | OPAQUE id gate_scope '(' gate_id_list ')' bit_list
     #
-    # These are like gate declaratons only wihtout a body.
+    # These are like gate declarations only wihtout a body.
     # ----------------------------------------
     def p_opaque_0(self, program):
         """
@@ -922,13 +932,13 @@ class QasmParser(object):
         """
            unary : REAL
         """
-        program[0] = node.Real(program[1])
+        program[0] = node.Real(sympy.Number(program[1]))
 
     def p_unary_2(self, program):
         """
            unary : PI
         """
-        program[0] = node.Real(math.pi)
+        program[0] = node.Real(sympy.pi)
 
     def p_unary_3(self, program):
         """
@@ -955,59 +965,30 @@ class QasmParser(object):
     # ----------------------------------------
     # Prefix
     # ----------------------------------------
-    def p_prefix_expression_0(self, program):
-        """
-           prefix_expression : unary
-        """
-        program[0] = program[1]
-
-    def p_prefix_expression_1(self, program):
-        """
-           prefix_expression : '+' prefix_expression
-                             | '-' prefix_expression
-        """
-        program[0] = node.Prefix([node.UnaryOperator(program[1]), program[2]])
-
-    def p_additive_expression_0(self, program):
-        """
-            additive_expression : prefix_expression
-        """
-        program[0] = program[1]
-
-    def p_additive_expression_1(self, program):
-        """
-            additive_expression : additive_expression '+' prefix_expression
-                                | additive_expression '-' prefix_expression
-        """
-        program[0] = node.BinaryOp([node.BinaryOperator(program[2]),
-                                    program[1], program[3]])
-
-    def p_multiplicative_expression_0(self, program):
-        """
-            multiplicative_expression : additive_expression
-        """
-        program[0] = program[1]
-
-    def p_multiplicative_expression_1(self, program):
-        """
-        multiplicative_expression : multiplicative_expression '*' additive_expression
-                                  | multiplicative_expression '/' additive_expression
-        """
-        program[0] = node.BinaryOp([node.BinaryOperator(program[2]),
-                                    program[1], program[3]])
-
-    def p_expression_0(self, program):
-        """
-            expression : multiplicative_expression
-        """
-        program[0] = program[1]
 
     def p_expression_1(self, program):
         """
-            expression : expression '^' multiplicative_expression
+            expression : '-' expression %prec negative
+                        | '+' expression %prec positive
+        """
+        program[0] = node.Prefix([node.UnaryOperator(program[1]), program[2]])
+
+    def p_expression_0(self, program):
+        """
+        expression : expression '*' expression
+                    | expression '/' expression
+                    | expression '+' expression
+                    | expression '-' expression
+                    | expression '^' expression
         """
         program[0] = node.BinaryOp([node.BinaryOperator(program[2]),
                                     program[1], program[3]])
+
+    def p_expression_2(self, program):
+        """
+            expression : unary
+        """
+        program[0] = program[1]
 
     # ----------------------------------------
     # exp_list : exp
@@ -1057,19 +1038,16 @@ class QasmParser(object):
         column = (token.lexpos - last_cr) + 1
         return column
 
-    def print_tokens(self):
-        """Test method to verify tokenizer."""
+    def get_tokens(self):
+        """Returns a generator of the tokens."""
         try:
             while True:
                 token = self.lexer.token()
+
                 if not token:
                     break
-                # TODO: This isn't really the column, it's the character
-                # position.  Need to do backtrack to the nearest \n to get
-                # the actual column.
-                print('TOKEN:' + str(token) + ":ENDTOKEN", 'at line',
-                      token.lineno, 'column', token.lexpos, 'file',
-                      self.lexer.filename)
+
+                yield token
         except QasmError as e:
             print('Exception tokenizing qasm file:', e.msg)
 

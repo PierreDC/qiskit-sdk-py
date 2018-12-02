@@ -1,75 +1,110 @@
 # -*- coding: utf-8 -*-
+# Copyright 2017, IBM.
+#
+# This source code is licensed under the Apache License, Version 2.0 found in
+# the LICENSE.txt file in the root directory of this source tree.
 
-# Copyright 2017 IBM RESEARCH. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# =============================================================================
-"""Common utilities for QISKit."""
+# pylint: disable=too-many-ancestors,broad-except
+
+"""Common utilities for Qiskit."""
 
 import logging
-from unittest.mock import patch
-
+import re
+import sys
+import platform
+import warnings
+import socket
+import psutil
 
 logger = logging.getLogger(__name__)
 
+FIRST_CAP_RE = re.compile('(.)([A-Z][a-z]+)')
+ALL_CAP_RE = re.compile('([a-z0-9])([A-Z])')
 
-def _check_ibmqe_version():
-    """Check if the available IBMQuantumExperience version is the required one.
 
-    Check that the version of the available "IBMQuantumExperience" package
-    matches the version required by the package, emitting a warning if it is
-    not present.
+def _check_python_version():
+    """Check for Python version 3.5+
     """
-    try:
-        # Use a local import, as in very specific environments setuptools
-        # might not be available or updated (conda with specific setup).
-        import pkg_resources
-    except ImportError:
-        return
+    if sys.version_info < (3, 5):
+        raise Exception('Qiskit requires Python version 3.5 or greater.')
 
-    working_set = pkg_resources.working_set
-    # Find if qiskit is installed and the current execution is using the
-    # installed package; or if it is a local environment.
-    qiskit_local = True
+
+def _enable_deprecation_warnings():
+    """
+    Force the `DeprecationWarning` warnings to be displayed for the qiskit
+    module, overriding the system configuration as they are ignored by default
+    [1] for end-users.
+
+    TODO: on Python 3.7, this might not be needed due to PEP-0565 [2].
+
+    [1] https://docs.python.org/3/library/warnings.html#default-warning-filters
+    [2] https://www.python.org/dev/peps/pep-0565/
+    """
+    # pylint: disable=invalid-name
+    deprecation_filter = ('always', None, DeprecationWarning,
+                          re.compile(r'^qiskit\.*', re.UNICODE), 0)
+
+    # Instead of using warnings.simple_filter() directly, the internal
+    # _add_filter() function is used for being able to match against the
+    # module.
     try:
-        qiskit_pkg = working_set.by_key['qiskit']
-        if __file__.startswith(qiskit_pkg.location):
-            qiskit_local = False
-    except KeyError:
+        warnings._add_filter(*deprecation_filter, append=False)
+    except AttributeError:
+        # ._add_filter is internal and not available in some Python versions.
         pass
 
-    # Find the IBMQuantumExperience version specified in qiskit.
-    if qiskit_local:
-        try:
-            # Mock setuptools.setup, as it would be executed during the import.
-            with patch('setuptools.setup'):
-                # Use a local import to fall back gracefully if not present.
-                from setup import requirements
-                ibmqe_require_line = next(r for r in requirements if
-                                          r.startswith('IBMQuantumExperience'))
-                ibmqe_require = pkg_resources.Requirement(ibmqe_require_line)
-        except (ImportError, pkg_resources.RequirementParseError):
-            return
-    else:
-        # Retrieve the requirement line from pkg_resources
-        ibmqe_require = next(r for r in qiskit_pkg.requires() if
-                             r.name == 'IBMQuantumExperience')
 
-    # Finally, check the requirement.
+def _camel_case_to_snake_case(identifier):
+    """Return a `snake_case` string from a `camelCase` string.
+
+    Args:
+        identifier (str): a `camelCase` string.
+
+    Returns:
+        str: a `snake_case` string.
+    """
+    string_1 = FIRST_CAP_RE.sub(r'\1_\2', identifier)
+    return ALL_CAP_RE.sub(r'\1_\2', string_1).lower()
+
+
+_check_python_version()
+_enable_deprecation_warnings()
+
+
+def local_hardware_info():
+    """Basic hardware information about the local machine.
+
+    Gives actual number of CPU's in the machine, even when hyperthreading is
+    turned on. CPU count defaults to 1 when true count can't be determined.
+
+    Returns:
+        dict: The hardware information.
+
+    """
+    results = {'os': platform.system()}
+    results['memory'] = psutil.virtual_memory().total / (1024**3)
+    results['cpus'] = psutil.cpu_count(logical=False) or 1
+    return results
+
+
+def _has_connection(hostname, port):
+    """Checks to see if internet connection exists to host
+    via specified port
+
+    If any exception is raised while trying to open a socket this will return
+    false.
+
+    Args:
+        hostname (str): Hostname to connect to.
+        port (int): Port to connect to
+
+    Returns:
+        bool: Has connection or not
+
+    """
     try:
-        working_set.require(str(ibmqe_require))
-    except pkg_resources.ResolutionError:
-        logger.warning('The installed IBMQuantumExperience package does '
-                       'not match the required version - some features might '
-                       'not work as intended. Please install %s.',
-                       str(ibmqe_require))
+        host = socket.gethostbyname(hostname)
+        socket.create_connection((host, port), 2)
+        return True
+    except Exception:
+        return False

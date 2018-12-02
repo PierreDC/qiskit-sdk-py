@@ -1,49 +1,45 @@
-.. QISKit documentation master file, created by
+.. Qiskit Terra documentation master file, created by
    sphinx-quickstart on Tue Jul 25 18:13:28 2017.
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-====================
-QISKit Documentation
-====================
-
-Quantum Information Software Kit (QISKit), SDK Python version for working
-with `OpenQASM <https://github.com/QISKit/openqasm>`_ and the IBM Q experience
-(QX).
+Qiskit Terra Documentation
+##########################
 
 
 Table of Contents
-=================
+*****************
 
 .. toctree::
    :maxdepth: 2
 
-   install
-   Getting started <quickstart>
-   QISKit overview <qiskit>
-   Developer documentation <dev_introduction>
-   SDK reference <_autodoc/qiskit>
+   Overview <overview>
+   Installation and Setup <install>
+   Getting Started with Qiskit Terra <getting_started_with_qiskit_terra>
+   The IBM Q Provider <the_ibmq_provider>
+   Summary of Quantum Operations <summary_of_quantum_operations>
+   Contributing to Terra <CONTRIBUTING>
+   Release history <release_history>
+   Terra SDK Reference <_autodoc/qiskit>
+
 
 Python Modules
-==============
+**************
+
 
 Main Modules
-------------
+============
 
 .. autosummary::
    :nosignatures:
 
-   qiskit.QuantumProgram
-   qiskit.QuantumCircuit
+   qiskit
 
 :ref:`modindex`
 
-Authors (alphabetical)
-======================
 
-Jim Challenger, Andrew Cross, Ismael Faro, Jay Gambetta, Juan Gomez,
-Paco Martin, Antonio Mezzacapo, Jesus Perez, and John Smolin, Erick Winston,
-Chris Wood.
+Authors 
+*******
 
-In future releases, anyone who contributes code to this project can include
-their name here.
+Qiskit Terra would not be possible without the `many contributors <https://github.com/Qiskit/qiskit-terra/graphs/contributors>`_ 
+from our community.

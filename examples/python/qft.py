@@ -1,89 +1,26 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2017 IBM RESEARCH. All Rights Reserved.
+# Copyright 2017, IBM.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# =============================================================================
+# This source code is licensed under the Apache License, Version 2.0 found in
+# the LICENSE.txt file in the root directory of this source tree.
 
 """
 Quantum Fourier Transform examples.
+
+Note: if you have only cloned the Qiskit repository but not
+used `pip install`, the examples only work from the root directory.
 """
 
-import sys
-import os
 import math
+from qiskit import QuantumRegister, ClassicalRegister, QuantumCircuit
+from qiskit import execute, Aer, IBMQ
+from qiskit.backends.ibmq import least_busy
 
-# We don't know from where the user is running the example,
-# so we need a relative position from this file path.
-# TODO: Relative imports for intra-package imports are highly discouraged.
-# http://stackoverflow.com/a/7506006
-sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
-from qiskit import QuantumProgram
-
-import Qconfig
 
 ###############################################################
-# Set the backend name and coupling map.
+# make the qft
 ###############################################################
-backend = "ibmqx2"
-coupling_map = {0: [1, 2],
-                1: [2],
-                2: [],
-                3: [2, 4],
-                4: [2]}
-
-###############################################################
-# Make a quantum program for the GHZ state.
-###############################################################
-QPS_SPECS = {
-    "circuits": [
-        {
-            "name": "qft3",
-            "quantum_registers": [{
-                "name": "q",
-                "size": 5
-            }],
-            "classical_registers": [{
-                "name": "c",
-                "size": 5
-            }]
-        },
-        {
-            "name": "qft4",
-            "quantum_registers": [{
-                "name": "q",
-                "size": 5
-            }],
-            "classical_registers": [{
-                "name": "c",
-                "size": 5
-            }]
-        },
-        {
-            "name": "qft5",
-            "quantum_registers": [{
-                "name": "q",
-                "size": 5
-            }],
-            "classical_registers": [
-                {"name": "c",
-                 "size": 5}
-            ]
-        }
-    ]
-}
-
-
 def input_state(circ, q, n):
     """n-qubit input state for QFT that produces output 1."""
     for j in range(n):
@@ -99,13 +36,11 @@ def qft(circ, q, n):
         circ.h(q[j])
 
 
-qp = QuantumProgram(specs=QPS_SPECS)
-q = qp.get_quantum_register("q")
-c = qp.get_classical_register("c")
-
-qft3 = qp.get_circuit("qft3")
-qft4 = qp.get_circuit("qft4")
-qft5 = qp.get_circuit("qft5")
+q = QuantumRegister(5, "q")
+c = ClassicalRegister(5, "c")
+qft3 = QuantumCircuit(q, c, name="qft3")
+qft4 = QuantumCircuit(q, c, name="qft4")
+qft5 = QuantumCircuit(q, c, name="qft5")
 
 input_state(qft3, q, 3)
 qft3.barrier()
@@ -128,29 +63,37 @@ qft5.barrier()
 for j in range(5):
     qft5.measure(q[j], c[j])
 
-print(qft3.qasm())
-print(qft4.qasm())
-print(qft5.qasm())
-
+print(qft3)
+print(qft4)
+print(qft5)
 
 ###############################################################
 # Set up the API and execute the program.
 ###############################################################
-qp.set_api(Qconfig.APItoken, Qconfig.config["url"])
+try:
+    IBMQ.load_accounts()
+except:
+    print("""WARNING: There's no connection with the API for remote backends.
+             Have you initialized a file with your personal token?
+             For now, there's only access to local simulator backends...""")
 
-result = qp.execute(["qft3", "qft4", "qft5"], backend='ibmqx_qasm_simulator',
-                    coupling_map=coupling_map, shots=1024)
+print('Qasm simulator')
+sim_backend = Aer.get_backend('qasm_simulator')
+job = execute([qft3, qft4, qft5], sim_backend, shots=1024)
+result = job.result()
 print(result)
-print(result.get_ran_qasm("qft3"))
-print(result.get_ran_qasm("qft4"))
-print(result.get_ran_qasm("qft5"))
-print(result.get_counts("qft3"))
-print(result.get_counts("qft4"))
-print(result.get_counts("qft5"))
+print(result.get_counts(qft3))
+print(result.get_counts(qft4))
+print(result.get_counts(qft5))
 
-
-result = qp.execute(["qft3"], backend=backend,
-                    coupling_map=coupling_map, shots=1024, timeout=120)
+# Second version: real device
+least_busy_device = least_busy(IBMQ.backends(simulator=False,
+                                             filters=lambda x: x.configuration()['n_qubits'] > 4))
+print("Running on current least busy device: ", least_busy_device)
+job = execute([qft3, qft4, qft5], least_busy_device, shots=1024)
+result = job.result()
 print(result)
-print(result.get_ran_qasm("qft3"))
-print(result.get_counts("qft3"))
+print(result.get_counts(qft3))
+print(result.get_counts(qft4))
+print(result.get_counts(qft5))
+

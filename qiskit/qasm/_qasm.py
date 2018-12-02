@@ -1,19 +1,9 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2017 IBM RESEARCH. All Rights Reserved.
+# Copyright 2017, IBM.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# =============================================================================
+# This source code is licensed under the Apache License, Version 2.0 found in
+# the LICENSE.txt file in the root directory of this source tree.
 
 """
 OPENQASM circuit object.
@@ -30,8 +20,8 @@ class Qasm(object):
         if filename is None and data is None:
             raise QasmError("Missing input file and/or data")
         if filename is not None and data is not None:
-            raise QasmError("File and data must not both be"
-                                + " specified initializing qasm")
+            raise QasmError("File and data must not both be specified"
+                            "initializing qasm")
         self._filename = filename
         self._data = data
 
@@ -39,19 +29,21 @@ class Qasm(object):
         """Return the filename."""
         return self._filename
 
-    def print_tokens(self):
-        """Parse and print tokens."""
+    def get_tokens(self):
+        """Returns a generator of the tokens."""
         if self._filename:
-            self._data = open(self._filename).read()
+            with open(self._filename) as ifile:
+                self._data = ifile.read()
 
-        qasm_p = QasmParser(self._filename)
-        return qasm_p.print_tokens()
+        with QasmParser(self._filename) as qasm_p:
+            return qasm_p.get_tokens()
 
     def parse(self):
         """Parse the data."""
         if self._filename:
             with open(self._filename) as ifile:
                 self._data = ifile.read()
-        qasm_p = QasmParser(self._filename)
-        qasm_p.parse_debug(False)
-        return qasm_p.parse(self._data)
+
+        with QasmParser(self._filename) as qasm_p:
+            qasm_p.parse_debug(False)
+            return qasm_p.parse(self._data)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# QISKit documentation build configuration file, created by
+# Qiskit documentation build configuration file, created by
 # sphinx-quickstart on Tue Jul 25 18:13:28 2017.
 #
 # This file is execfile()d with the current directory set to its
@@ -22,6 +22,8 @@ import sys
 from qiskit import __version__
 sys.path.insert(0, os.path.abspath('.'))
 
+# Imported manually, as otherwise it will not be fully imported.
+import qiskit.extensions.simulator
 
 # -- General configuration ------------------------------------------------
 
@@ -39,12 +41,7 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx.ext.coverage',
               'sphinx.ext.mathjax',
               'sphinx.ext.viewcode',
-              'sphinx.ext.githubpages',
-              'sphinxcontrib.fulltoc']
-
-autodoc_default_flags = ['members', 'undoc-members', 'show-inheritance',
-                         'inherited-members']
-
+              'sphinx.ext.githubpages']
 # Napoleon settings
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False
@@ -57,6 +54,8 @@ napoleon_use_admonition_for_references = False
 napoleon_use_ivar = False
 napoleon_use_param = True
 napoleon_use_rtype = True
+
+autoclass_content = 'both'
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -71,13 +70,13 @@ source_suffix = '.rst'
 master_doc = 'index'
 
 # General information about the project.
-project = 'QISKit SDK'
-copyright = '2017 IBM Research'
-author = 'IBM Research'
+project = 'Qiskit Terra'
+copyright = '2017-2018 IBM'
+author = 'IBM'
 
 # Add description
 html_context = {
-    'description': 'Quantum Information Software Kit'
+    'description': 'Qiskit Terra'
 }
 
 # The version info for the project you're documenting, acts as replacement for
@@ -99,7 +98,8 @@ language = None
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This patterns also effect to html_static_path and html_extra_path
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', '_autodoc/modules.rst']
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store',
+                    '_autodoc/modules.rst', 'de', 'ja']
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = 'sphinx'
@@ -117,7 +117,12 @@ todo_include_todos = False
 # html_theme = 'bizstyle'
 # html_theme = agogo
 
-html_theme = 'theme'  # use the theme in subdir 'theme'
+html_sidebars = {
+   '**': ['globaltoc.html']
+}
+
+
+html_theme = 'sphinx_materialdesign_theme' # use the theme in subdir 'theme'
 html_theme_path = ['./']  # make sphinx search for themes in current dir
 
 
@@ -125,16 +130,60 @@ html_theme_path = ['./']  # make sphinx search for themes in current dir
 # further.  For a list of options available for each theme, see the
 # documentation.
 #
-html_theme_options = {}
+html_theme_options = {
+    # Specify a list of menu in Header.
+    # Tuples forms:
+    #  ('Name', 'external url or path of pages in the document', boolean, 'icon name')
+    #
+    # Third argument:
+    # True indicates an external link.
+    # False indicates path of pages in the document.
+    #
+    # Fourth argument:
+    # Specify the icon name.
+    # For details see link.
+    # https://material.io/icons/
+    'header_links' : [
+        ('Home', 'index', False, 'home'),
+        ("ExternalLink", "http://example.com", True, 'launch'),
+        ("NoIconLink", "http://example.com", True, ''),
+        ("GitHub", "https://github.com/myyasuda/sphinx_materialdesign_theme", True, 'link')
+    ],
 
+    # Customize css colors.
+    # For details see link.
+    # https://getmdl.io/customize/index.html
+    #
+    # Values: amber, blue, brown, cyan deep_orange, deep_purple, green, grey, indigo, light_blue,
+    #         light_green, lime, orange, pink, purple, red, teal, yellow(Default: indigo)
+    'primary_color': 'blue',
+    # Values: Same as primary_color. (Default: pink)
+    'accent_color': 'indigo',
+
+    # Customize layout.
+    # For details see link.
+    # https://getmdl.io/components/index.html#layout-section
+    'fixed_drawer': True,
+    'fixed_header': False,
+    'header_waterfall': True,
+    'header_scroll': False,
+
+    # Render title in header.
+    # Values: True, False (Default: False)
+    'show_header_title': False,
+    # Render title in drawer.
+    # Values: True, False (Default: True)
+    'show_drawer_title': True,
+    # Render footer.
+}
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = []
+html_static_path = ['./theme/static/']
 
 # The name of an image file (relative to this directory) to place at the top
 # of the sidebar.
-html_logo = 'theme/static/qiskit-logo-white-no-margin.gif'
+html_logo = 'theme/static/qiskit-terra-logo.png'
 
 html_favicon = 'theme/static/favicon.ico'
 
@@ -143,7 +192,7 @@ html_last_updated_fmt = '%Y/%m/%d'
 # -- Options for HTMLHelp output ------------------------------------------
 
 # Output file base name for HTML help builder.
-htmlhelp_basename = 'QISKitdoc'
+htmlhelp_basename = 'Qiskitdoc'
 
 
 # -- Options for LaTeX output ---------------------------------------------
@@ -170,9 +219,8 @@ latex_elements = {
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
-    (master_doc, 'QISKit.tex', 'QISKit Documentation',
-     '''Jim Challenger, Andrew Cross, Ismael Faro, Jay Gambetta, Jesus Perez,
-     and John Smolin''', 'manual'),
+    (master_doc, 'Qiskit.tex', 'Qiskit Documentation',
+     '''Jim Challenger, Andrew Cross, Ismael Faro, Jay Gambetta''', 'manual'),
 ]
 
 
@@ -181,7 +229,7 @@ latex_documents = [
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
 man_pages = [
-    (master_doc, 'qiskit', 'QISKit Documentation',
+    (master_doc, 'qiskit', 'Qiskit Documentation',
      [author], 1)
 ]
 
@@ -192,8 +240,8 @@ man_pages = [
 # (source start file, target name, title, author,
 #  dir menu entry, description, category)
 texinfo_documents = [
-    (master_doc, 'QISKit', 'QISKit Documentation',
-     author, 'QISKit', 'One line description of project.',
+    (master_doc, 'Qiskit Terra', 'Qiskit Terra Documentation',
+     author, 'Qiskit', 'One line description of project.',
      'Miscellaneous'),
 ]
 

@@ -1,19 +1,11 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2017 IBM RESEARCH. All Rights Reserved.
+# Copyright 2017, IBM.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# =============================================================================
+# This source code is licensed under the Apache License, Version 2.0 found in
+# the LICENSE.txt file in the root directory of this source tree.
+
+# pylint: disable=no-member
 
 """
 Directed graph object for representing coupling between qubits.
@@ -25,6 +17,7 @@ onto a device with this coupling.
 """
 from collections import OrderedDict
 import networkx as nx
+from qiskit import _quantumregister
 from ._couplingerror import CouplingError
 
 
@@ -75,6 +68,7 @@ class Coupling:
     Nodes correspond to qubits and directed edges correspond to permitted
     CNOT gates
     """
+
     # pylint: disable=invalid-name
 
     def __init__(self, couplingdict=None):
@@ -85,7 +79,7 @@ class Coupling:
         specifies the graph as an adjacency list. For example,
         couplingdict = {0: [1, 2], 1: [2]}.
         """
-        # self.qubits is dict from qubit (regname,idx) tuples to node indices
+        # self.qubits is dict from qubit (reg,idx) tuples to node indices
         self.qubits = OrderedDict()
         # self.index_to_qubit is a dict from node indices to qubits
         self.index_to_qubit = {}
@@ -98,10 +92,13 @@ class Coupling:
         self.dist = None
         # Add edges to the graph if the couplingdict is present
         if couplingdict is not None:
+            couplinglist = coupling_dict2list(couplingdict)
+            num_qubits = 1 + max(max(x[0] for x in couplinglist),
+                                 max(x[1] for x in couplinglist))
+            reg = _quantumregister.QuantumRegister(num_qubits, 'q')
             for v0, alist in couplingdict.items():
                 for v1 in alist:
-                    regname = "q"
-                    self.add_edge((regname, v0), (regname, v1))
+                    self.add_edge((reg, v0), (reg, v1))
             self.compute_distance()
 
     def size(self):
@@ -109,8 +106,8 @@ class Coupling:
         return len(self.qubits)
 
     def get_qubits(self):
-        """Return the qubits in this graph as (qreg, index) tuples."""
-        return list(self.qubits.keys())
+        """Return the qubits in this graph as a sorted (qreg, index) tuples."""
+        return sorted(list(self.qubits.keys()))
 
     def get_edges(self):
         """Return a list of edges in the coupling graph.
@@ -120,33 +117,39 @@ class Coupling:
         return list(map(lambda x: (self.index_to_qubit[x[0]],
                                    self.index_to_qubit[x[1]]), self.G.edges()))
 
-    def add_qubit(self, name):
+    def add_qubit(self, qubit):
         """
         Add a qubit to the coupling graph.
 
-        name = tuple (regname, idx) for qubit
+        qubit = tuple (reg, idx) for qubit
         """
-        if name in self.qubits:
-            raise CouplingError("%s already in coupling graph" % name)
+        if qubit in self.qubits:
+            raise CouplingError("%s already in coupling graph" % qubit)
+        if not isinstance(qubit, tuple):
+            raise CouplingError("qubit %s is not a tuple")
+        if not (isinstance(qubit[0], _quantumregister.QuantumRegister) and
+                isinstance(qubit[1], int)):
+            raise CouplingError("qubit %s is not of the right form, it must"
+                                " be: (reg, idx)")
 
         self.node_counter += 1
         self.G.add_node(self.node_counter)
-        self.G.node[self.node_counter]["name"] = name
-        self.qubits[name] = self.node_counter
-        self.index_to_qubit[self.node_counter] = name
+        self.G.node[self.node_counter]["name"] = str((qubit[0].name, qubit[1]))
+        self.qubits[qubit] = self.node_counter
+        self.index_to_qubit[self.node_counter] = qubit
 
-    def add_edge(self, s_name, d_name):
+    def add_edge(self, s_qubit, d_qubit):
         """
         Add directed edge to coupling graph.
 
-        s_name = source qubit tuple
-        d_name = destination qubit tuple
+        s_qubit = source qubit tuple
+        d_qubit = destination qubit tuple
         """
-        if s_name not in self.qubits:
-            self.add_qubit(s_name)
-        if d_name not in self.qubits:
-            self.add_qubit(d_name)
-        self.G.add_edge(self.qubits[s_name], self.qubits[d_name])
+        if s_qubit not in self.qubits:
+            self.add_qubit(s_qubit)
+        if d_qubit not in self.qubits:
+            self.add_qubit(d_qubit)
+        self.G.add_edge(self.qubits[s_qubit], self.qubits[d_qubit])
 
     def connected(self):
         """
@@ -154,18 +157,21 @@ class Coupling:
 
         Return True if connected, False otherwise
         """
-        return nx.is_weakly_connected(self.G)
+        try:
+            return nx.is_weakly_connected(self.G)
+        except nx.exception.NetworkXException:
+            return False
 
     def compute_distance(self):
         """
-        Compute the distance function on pairs of nodes.
+        Compute the undirected distance function on pairs of nodes.
 
         The distance map self.dist is computed from the graph using
         all_pairs_shortest_path_length.
         """
         if not self.connected():
             raise CouplingError("coupling graph not connected")
-        lengths = nx.all_pairs_shortest_path_length(self.G.to_undirected())
+        lengths = dict(nx.all_pairs_shortest_path_length(self.G.to_undirected()))
         self.dist = {}
         for i in self.qubits.keys():
             self.dist[i] = {}
@@ -173,21 +179,25 @@ class Coupling:
                 self.dist[i][j] = lengths[self.qubits[i]][self.qubits[j]]
 
     def distance(self, q1, q2):
-        """Return the distance between qubit q1 to qubit q2."""
+        """Return the undirected distance between qubit q1 to qubit q2."""
         if self.dist is None:
             raise CouplingError("distance has not been computed")
         if q1 not in self.qubits:
-            raise CouplingError("%s not in coupling graph" % q1)
+            raise CouplingError("%s not in coupling graph" % (q1,))
         if q2 not in self.qubits:
-            raise CouplingError("%s not in coupling graph" % q2)
+            raise CouplingError("%s not in coupling graph" % (q2,))
         return self.dist[q1][q2]
 
     def __str__(self):
         """Return a string representation of the coupling graph."""
-        s = "qubits: "
-        s += ", ".join(["%s[%d] @ %d" % (k[0], k[1], v)
-                        for k, v in self.qubits.items()])
-        s += "\nedges: "
-        s += ", ".join(["%s[%d]-%s[%d]" % (e[0][0], e[0][1], e[1][0], e[1][1])
-                        for e in self.get_edges()])
+        s = ""
+        if self.qubits:
+            s += "qubits: "
+            s += ", ".join(["%s[%d] @ %d" % (k[0].name, k[1], v)
+                            for k, v in self.qubits.items()])
+        if self.get_edges():
+            s += "\nedges: "
+            s += ", ".join(
+                ["%s[%d]-%s[%d]" % (e[0][0].name, e[0][1], e[1][0].name, e[1][1])
+                 for e in self.get_edges()])
         return s

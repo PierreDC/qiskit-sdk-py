@@ -1,24 +1,15 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2017 IBM RESEARCH. All Rights Reserved.
+# Copyright 2017, IBM.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# =============================================================================
+# This source code is licensed under the Apache License, Version 2.0 found in
+# the LICENSE.txt file in the root directory of this source tree.
 
 """
 Node for an OPENQASM real number.
 """
-import math
+from sympy import latex, pi
+from sympy.printing.ccode import ccode
 from ._node import Node
 
 
@@ -30,6 +21,7 @@ class Real(Node):
 
     def __init__(self, id):
         """Create the real node."""
+        # pylint: disable=redefined-builtin
         Node.__init__(self, "real", None, None)
         self.value = id
 
@@ -40,16 +32,22 @@ class Real(Node):
 
     def qasm(self, prec=15):
         """Return the corresponding OPENQASM string."""
-        fspec = "%%0.%df" % prec
-        return fspec % self.value
+        if self.value == pi:
+            return "pi"
+
+        return ccode(self.value, precision=prec)
 
     def latex(self, prec=15, nested_scope=None):
         """Return the corresponding math mode latex string."""
-        if math.isclose(self.value, math.pi):
-            return "\\pi"
-        fspec = "%%0.%df" % prec
-        return fspec % self.value
+        # pylint: disable=unused-argument
+        return latex(self.value)
+
+    def sym(self, nested_scope=None):
+        """Return the correspond symbolic number."""
+        # pylint: disable=unused-argument
+        return self.value
 
     def real(self, nested_scope=None):
         """Return the correspond floating point number."""
-        return self.value
+        # pylint: disable=unused-argument
+        return float(self.value.evalf())

@@ -1,38 +1,42 @@
 # -*- coding: utf-8 -*-
-# pylint: disable=invalid-name
 
-# Copyright 2017 IBM RESEARCH. All Rights Reserved.
+# Copyright 2017, IBM.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# =============================================================================
+# This source code is licensed under the Apache License, Version 2.0 found in
+# the LICENSE.txt file in the root directory of this source tree.
+
+# pylint: disable=invalid-name, inconsistent-return-statements
 
 """
 Layout module to assist with mapping circuit qubits onto physical qubits.
 """
-import sys
-import copy
 import logging
-import math
-import numpy as np
-import networkx as nx
 import pprint
-from ._mappererror import MapperError
-from qiskit.qasm import Qasm
-import qiskit.unroll as unroll
+import sys
 
+import networkx as nx
+import numpy as np
+import sympy
+from sympy import Number as N
+
+from qiskit.qasm import _node as node
+from qiskit.mapper import MapperError
+from qiskit.dagcircuit import DAGCircuit
+from qiskit.dagcircuit._dagcircuiterror import DAGCircuitError
+from qiskit.unrollers._dagunroller import DagUnroller
+from qiskit.unrollers._dagbackend import DAGBackend
+from qiskit.quantum_info.operators.quaternion import quaternion_from_euler
+from qiskit import QuantumRegister
+from qiskit.extensions.standard.h import HGate
+from qiskit.extensions.standard.cx import CnotGate
+from qiskit.extensions.standard.swap import SwapGate
+from qiskit.extensions.standard.u1 import U1Gate
+from qiskit.extensions.standard.u2 import U2Gate
+from qiskit.extensions.standard.u3 import U3Gate
+from qiskit._measure import Measure
+from qiskit._instruction import Instruction
 
 logger = logging.getLogger(__name__)
-
 
 # Notes:
 # Measurements may occur and be followed by swaps that result in repeated
@@ -43,8 +47,100 @@ logger = logging.getLogger(__name__)
 # It can happen that initial swaps can be removed or partly simplified
 # because the initial state is zero. We don't do this.
 
+cx_data = {
+    "opaque": False,
+    "n_args": 0,
+    "n_bits": 2,
+    "args": [],
+    "bits": ["c", "t"],
+    # gate cx c,t { CX c,t; }
+    "body": node.GateBody([
+        node.Cnot([
+            node.Id("c", 0, ""),
+            node.Id("t", 0, "")
+        ])
+    ])
+}
 
-def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials):
+swap_data = {
+    "opaque": False,
+    "n_args": 0,
+    "n_bits": 2,
+    "args": [],
+    "bits": ["a", "b"],
+    # gate swap a,b { cx a,b; cx b,a; cx a,b; }
+    "body": node.GateBody([
+        node.CustomUnitary([
+            node.Id("cx", 0, ""),
+            node.PrimaryList([
+                node.Id("a", 0, ""),
+                node.Id("b", 0, "")
+            ])
+        ]),
+        node.CustomUnitary([
+            node.Id("cx", 0, ""),
+            node.PrimaryList([
+                node.Id("b", 0, ""),
+                node.Id("a", 0, "")
+            ])
+        ]),
+        node.CustomUnitary([
+            node.Id("cx", 0, ""),
+            node.PrimaryList([
+                node.Id("a", 0, ""),
+                node.Id("b", 0, "")
+            ])
+        ])
+    ])
+}
+
+u2_data = {
+    "opaque": False,
+    "n_args": 2,
+    "n_bits": 1,
+    "args": ["phi", "lambda"],
+    "bits": ["q"],
+    # gate u2(phi,lambda) q { U(pi/2,phi,lambda) q; }
+    "body": node.GateBody([
+        node.UniversalUnitary([
+            node.ExpressionList([
+                node.BinaryOp([
+                    node.BinaryOperator('/'),
+                    node.Real(sympy.pi),
+                    node.Int(2)
+                ]),
+                node.Id("phi", 0, ""),
+                node.Id("lambda", 0, "")
+            ]),
+            node.Id("q", 0, "")
+        ])
+    ])
+}
+
+h_data = {
+    "opaque": False,
+    "n_args": 0,
+    "n_bits": 1,
+    "args": [],
+    "bits": ["a"],
+    # gate h a { u2(0,pi) a; }
+    "body": node.GateBody([
+        node.CustomUnitary([
+            node.Id("u2", 0, ""),
+            node.ExpressionList([
+                node.Int(0),
+                node.Real(sympy.pi)
+            ]),
+            node.PrimaryList([
+                node.Id("a", 0, "")
+            ])
+        ])
+    ])
+}
+
+
+def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials,
+                      seed=None):
     """Find a swap circuit that implements a permutation for this layer.
 
     The goal is to swap qubits such that qubits in the same two-qubit gates
@@ -63,12 +159,14 @@ def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials):
 
     Returns: success_flag, best_circ, best_d, best_layout, trivial_flag
 
-    If success_flag is True, then best_circ contains an OPENQASM string with
+    If success_flag is True, then best_circ contains a DAGCircuit with
     the swap circuit, best_d contains the depth of the swap circuit, and
     best_layout contains the new positions of the data qubits after the
     swap circuit has been applied. The trivial_flag is set if the layer
     has no multi-qubit gates.
     """
+    if seed is not None:
+        np.random.seed(seed)
     logger.debug("layer_permutation: ----- enter -----")
     logger.debug("layer_permutation: layer_partition = %s",
                  pprint.pformat(layer_partition))
@@ -87,6 +185,9 @@ def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials):
 
     logger.debug("layer_permutation: gates = %s", pprint.pformat(gates))
 
+    # Find layout maximum index
+    layout_max_index = max(map(lambda x: x[1] + 1, layout.values()))
+
     # Can we already apply the gates?
     dist = sum([coupling.distance(layout[g[0]],
                                   layout[g[1]]) for g in gates])
@@ -94,7 +195,14 @@ def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials):
     if dist == len(gates):
         logger.debug("layer_permutation: done already")
         logger.debug("layer_permutation: ----- exit -----")
-        return True, "", 0, layout, len(gates) == 0
+        circ = DAGCircuit()
+        circ.add_qreg(QuantumRegister(coupling.size(), "q"))
+        circ.add_basis_element("CX", 2)
+        circ.add_basis_element("cx", 2)
+        circ.add_basis_element("swap", 2)
+        circ.add_gate_data("cx", cx_data)
+        circ.add_gate_data("swap", swap_data)
+        return True, circ, 0, layout, bool(gates)
 
     # Begin loop over trials of randomized algorithm
     n = coupling.size()
@@ -104,9 +212,11 @@ def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials):
     for trial in range(trials):
 
         logger.debug("layer_permutation: trial %s", trial)
-        trial_layout = copy.deepcopy(layout)
-        rev_trial_layout = copy.deepcopy(rev_layout)
-        trial_circ = ""  # circuit produced in this trial
+        trial_layout = layout.copy()
+        rev_trial_layout = rev_layout.copy()
+        # SWAP circuit constructed this trial
+        trial_circ = DAGCircuit()
+        trial_circ.add_qreg(QuantumRegister(coupling.size(), "q"))
 
         # Compute Sergey's randomized distance
         xi = {}
@@ -114,14 +224,26 @@ def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials):
             xi[i] = {}
         for i in coupling.get_qubits():
             for j in coupling.get_qubits():
-                scale = 1.0 + np.random.normal(0.0, 1.0 / n)
-                xi[i][j] = scale * coupling.distance(i, j)**2
+                scale = 1 + np.random.normal(0, 1 / n)
+                xi[i][j] = scale * coupling.distance(i, j) ** 2
                 xi[j][i] = xi[i][j]
 
         # Loop over depths d up to a max depth of 2n+1
         d = 1
-        circ = ""  # circuit for this swap slice
-        while d < 2*n+1:
+        # Circuit for this swap slice
+        circ = DAGCircuit()
+        circ.add_qreg(QuantumRegister(coupling.size(), "q"))
+        circ.add_basis_element("CX", 2)
+        circ.add_basis_element("cx", 2)
+        circ.add_basis_element("swap", 2)
+        circ.add_gate_data("cx", cx_data)
+        circ.add_gate_data("swap", swap_data)
+
+        # Identity wire-map for composing the circuits
+        q = QuantumRegister(coupling.size(), 'q')
+        identity_wire_map = {(q, j): (q, j) for j in range(layout_max_index)}
+
+        while d < 2 * n + 1:
             # Set of available qubits
             qubit_set = set(qubit_subset)
             # While there are still qubits available
@@ -136,10 +258,10 @@ def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials):
                     # Are the qubits available?
                     if e[0] in qubit_set and e[1] in qubit_set:
                         # Try this edge to reduce the cost
-                        new_layout = copy.deepcopy(trial_layout)
+                        new_layout = trial_layout.copy()
                         new_layout[rev_trial_layout[e[0]]] = e[1]
                         new_layout[rev_trial_layout[e[1]]] = e[0]
-                        rev_new_layout = copy.deepcopy(rev_trial_layout)
+                        rev_new_layout = rev_trial_layout.copy()
                         rev_new_layout[e[0]] = rev_trial_layout[e[1]]
                         rev_new_layout[e[1]] = rev_trial_layout[e[0]]
                         # Compute the objective function
@@ -161,10 +283,9 @@ def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials):
                     qubit_set.remove(opt_edge[1])
                     trial_layout = opt_layout
                     rev_trial_layout = rev_opt_layout
-                    circ += "swap %s[%d],%s[%d]; " % (opt_edge[0][0],
-                                                      opt_edge[0][1],
-                                                      opt_edge[1][0],
-                                                      opt_edge[1][1])
+                    circ.apply_operation_back(
+                        SwapGate((opt_edge[0][0], opt_edge[0][1]),
+                                 (opt_edge[1][0], opt_edge[1][1])))
                     logger.debug("layer_permutation: chose pair %s",
                                  pprint.pformat(opt_edge))
                 else:
@@ -179,7 +300,7 @@ def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials):
             # Otherwise we need to consider a deeper swap circuit
             if dist == len(gates):
                 logger.debug("layer_permutation: all can be applied now")
-                trial_circ += circ
+                trial_circ.compose_back(circ, identity_wire_map)
                 break
 
             # Increment the depth
@@ -201,10 +322,10 @@ def layer_permutation(layer_partition, layout, qubit_subset, coupling, trials):
         logger.debug("layer_permutation: failed!")
         logger.debug("layer_permutation: ----- exit -----")
         return False, None, None, None, False
-    else:
-        logger.debug("layer_permutation: done")
-        logger.debug("layer_permutation: ----- exit -----")
-        return True, best_circ, best_d, best_layout, False
+
+    logger.debug("layer_permutation: done")
+    logger.debug("layer_permutation: ----- exit -----")
+    return True, best_circ, best_d, best_layout, False
 
 
 def direction_mapper(circuit_graph, coupling_graph):
@@ -225,21 +346,28 @@ def direction_mapper(circuit_graph, coupling_graph):
     if circuit_graph.basis["cx"] != (2, 0, 0):
         raise MapperError("cx gate has unexpected signature %s" %
                           circuit_graph.basis["cx"])
-    flipped_qasm = "OPENQASM 2.0;\n" + \
-                   "gate cx c,t { CX c,t; }\n" + \
-                   "gate u2(phi,lambda) q { U(pi/2,phi,lambda) q; }\n" + \
-                   "gate h a { u2(0,pi) a; }\n" + \
-                   "gate cx_flipped a,b { h a; h b; cx b, a; h a; h b; }\n" + \
-                   "qreg q[2];\n" + \
-                   "cx_flipped q[0],q[1];\n"
-    u = unroll.Unroller(Qasm(data=flipped_qasm).parse(),
-                        unroll.DAGBackend(["cx", "h"]))
-    flipped_cx_circuit = u.execute()
-    cx_node_list = circuit_graph.get_named_nodes("cx")
+
+    q = QuantumRegister(2, "fcx")
+    flipped_cx_circuit = DAGCircuit()
+    flipped_cx_circuit.add_qreg(q)
+    flipped_cx_circuit.add_basis_element("CX", 2)
+    flipped_cx_circuit.add_basis_element("U", 1, 0, 3)
+    flipped_cx_circuit.add_basis_element("cx", 2)
+    flipped_cx_circuit.add_basis_element("u2", 1, 0, 2)
+    flipped_cx_circuit.add_basis_element("h", 1)
+    flipped_cx_circuit.add_gate_data("cx", cx_data)
+    flipped_cx_circuit.add_gate_data("u2", u2_data)
+    flipped_cx_circuit.add_gate_data("h", h_data)
+    flipped_cx_circuit.apply_operation_back(HGate(q[0]))
+    flipped_cx_circuit.apply_operation_back(HGate(q[1]))
+    flipped_cx_circuit.apply_operation_back(CnotGate(q[1], q[0]))
+    flipped_cx_circuit.apply_operation_back(HGate(q[0]))
+    flipped_cx_circuit.apply_operation_back(HGate(q[1]))
+
     cg_edges = coupling_graph.get_edges()
-    for cx_node in cx_node_list:
+    for cx_node in circuit_graph.get_named_nodes("cx"):
         nd = circuit_graph.multi_graph.node[cx_node]
-        cxedge = tuple(nd["qargs"])
+        cxedge = tuple(nd["op"].qargs)
         if cxedge in cg_edges:
             logger.debug("cx %s[%d], %s[%d] -- OK",
                          cxedge[0][0], cxedge[0][1],
@@ -248,32 +376,36 @@ def direction_mapper(circuit_graph, coupling_graph):
         elif (cxedge[1], cxedge[0]) in cg_edges:
             circuit_graph.substitute_circuit_one(cx_node,
                                                  flipped_cx_circuit,
-                                                 wires=[("q", 0), ("q", 1)])
+                                                 wires=[q[0], q[1]])
             logger.debug("cx %s[%d], %s[%d] -FLIP",
                          cxedge[0][0], cxedge[0][1],
                          cxedge[1][0], cxedge[1][1])
         else:
             raise MapperError("circuit incompatible with CouplingGraph: "
-                              "cx on %s", pprint.pformat(cxedge))
+                              "cx on %s" % pprint.pformat(cxedge))
     return circuit_graph
 
 
-def update_qasm(i, first_layer, best_layout, best_d,
-                best_circ, circuit_graph, layer_list):
+def swap_mapper_layer_update(i, first_layer, best_layout, best_d,
+                             best_circ, layer_list, coupling_graph):
     """Update the QASM string for an iteration of swap_mapper.
 
     i = layer number
     first_layer = True if this is the first layer with multi-qubit gates
     best_layout = layout returned from swap algorithm
-    best_d = depth returns from swap algorithm
+    best_d = depth returned from swap algorithm
     best_circ = swap circuit returned from swap algorithm
-    circuit_graph = original input circuit
     layer_list = list of circuit objects for each layer
 
-    Return openqasm_output, the QASM string to append.
+    Return DAGCircuit object to append to the output DAGCircuit.
     """
-    openqasm_output = ""
     layout = best_layout
+    layout_max_index = max(map(lambda x: x[1] + 1, layout.values()))
+    dagcircuit_output = DAGCircuit()
+    dagcircuit_output.add_qreg(QuantumRegister(coupling_graph.size(), "q"))
+    # Identity wire-map for composing the circuits
+    q = QuantumRegister(coupling_graph.size(), 'q')
+    identity_wire_map = {(q, j): (q, j) for j in range(layout_max_index)}
 
     # If this is the first layer with multi-qubit gates,
     # output all layers up to this point and ignore any
@@ -281,61 +413,64 @@ def update_qasm(i, first_layer, best_layout, best_d,
     if first_layer:
         logger.debug("update_qasm_and_layout: first multi-qubit gate layer")
         # Output all layers up to this point
-        openqasm_output += circuit_graph.qasm(
-            add_swap=True,
-            decls_only=True,
-            aliases=layout)
-        for j in range(i+1):
-            openqasm_output += layer_list[j]["graph"].qasm(
-                no_decls=True,
-                aliases=layout)
+        for j in range(i + 1):
+            dagcircuit_output.compose_back(layer_list[j]["graph"], layout)
     # Otherwise, we output the current layer and the associated swap gates.
     else:
         # Output any swaps
         if best_d > 0:
             logger.debug("update_qasm_and_layout: swaps in this layer, "
                          "depth %d", best_d)
-            openqasm_output += best_circ
+            dagcircuit_output.compose_back(best_circ, identity_wire_map)
         else:
             logger.debug("update_qasm_and_layout: no swaps in this layer")
         # Output this layer
-        openqasm_output += layer_list[i]["graph"].qasm(
-            no_decls=True,
-            aliases=layout)
-    return openqasm_output
+        dagcircuit_output.compose_back(layer_list[i]["graph"], layout)
+    return dagcircuit_output
 
 
 def swap_mapper(circuit_graph, coupling_graph,
                 initial_layout=None,
-                basis="cx,u1,u2,u3,id", trials=20):
+                basis="cx,u1,u2,u3,id", trials=20, seed=None):
     """Map a DAGCircuit onto a CouplingGraph using swap gates.
 
     Args:
         circuit_graph (DAGCircuit): input DAG circuit
         coupling_graph (CouplingGraph): coupling graph to map onto
-        initial_layout (dict): dict from qubits of circuit_graph to qubits
-            of coupling_graph (optional)
-        basis (str, optional): basis string specifying basis of output
-            DAGCircuit
+        initial_layout (dict): dict {(str, int): (str, int)}
+            from qubits of circuit_graph to qubits of coupling_graph (optional)
+        basis (str): basis string specifying basis of output DAGCircuit
+        trials (int): number of trials.
+        seed (int): initial seed.
 
     Returns:
-        Returns a DAGCircuit object containing a circuit equivalent to
+        DAGCircuit: object containing a circuit equivalent to
         circuit_graph that respects couplings in coupling_graph, and
         a layout dict mapping qubits of circuit_graph into qubits
         of coupling_graph. The layout may differ from the initial_layout
         if the first layer of gates cannot be executed on the
-        initial_layout.
+        initial_layout. Finally, returned is the final layer qubit
+        permutation that is needed to add measurements back in.
+
+    Raises:
+        MapperError: if there was any error during the mapping or with the
+            parameters.
     """
     if circuit_graph.width() > coupling_graph.size():
         raise MapperError("Not enough qubits in CouplingGraph")
 
     # Schedule the input circuit
-    layerlist = circuit_graph.layers()
+    layerlist = list(circuit_graph.layers())
     logger.debug("schedule:")
-    for i,v in enumerate(layerlist):
-        logger.debug("    %d: %s", (i, v["partition"]))
+    for i, v in enumerate(layerlist):
+        logger.debug("    %d: %s", i, v["partition"])
 
     if initial_layout is not None:
+        # update initial_layout from a user given dict{(regname,idx): (regname,idx)}
+        # to an expected dict{(reg,idx): (reg,idx)}
+        device_register = coupling_graph.get_qubits()[0][0]
+        initial_layout = {(circuit_graph.qregs[k[0]], k[1]): (device_register, v[1])
+                          for k, v in initial_layout.items()}
         # Check the input layout
         circ_qubits = circuit_graph.get_qubits()
         coup_qubits = coupling_graph.get_qubits()
@@ -344,10 +479,10 @@ def swap_mapper(circuit_graph, coupling_graph,
             qubit_subset.append(v)
             if k not in circ_qubits:
                 raise MapperError("initial_layout qubit %s[%d] not in input "
-                                  "DAGCircuit" % (k[0], k[1]))
+                                  "DAGCircuit" % (k[0].name, k[1]))
             if v not in coup_qubits:
                 raise MapperError("initial_layout qubit %s[%d] not in input "
-                                  "CouplingGraph" % (v[0], v[1]))
+                                  "CouplingGraph" % (v[0].name, v[1]))
     else:
         # Supply a default layout
         qubit_subset = coupling_graph.get_qubits()
@@ -356,8 +491,28 @@ def swap_mapper(circuit_graph, coupling_graph,
                           zip(circuit_graph.get_qubits(), qubit_subset)}
 
     # Find swap circuit to preceed to each layer of input circuit
-    layout = copy.deepcopy(initial_layout)
-    openqasm_output = ""
+    layout = initial_layout.copy()
+    layout_max_index = max(map(lambda x: x[1] + 1, layout.values()))
+
+    # Construct an empty DAGCircuit with one qreg "q"
+    # and the same set of cregs as the input circuit
+    dagcircuit_output = DAGCircuit()
+    dagcircuit_output.name = circuit_graph.name
+    dagcircuit_output.add_qreg(QuantumRegister(coupling_graph.size(), "q"))
+    for creg in circuit_graph.cregs.values():
+        dagcircuit_output.add_creg(creg)
+
+    # Make a trivial wire mapping between the subcircuits
+    # returned by swap_mapper_layer_update and the circuit
+    # we are building
+    identity_wire_map = {}
+    q = QuantumRegister(coupling_graph.size(), 'q')
+    for j in range(layout_max_index):
+        identity_wire_map[(q, j)] = (q, j)
+    for creg in circuit_graph.cregs.values():
+        for j in range(creg.size):
+            identity_wire_map[(creg, j)] = (creg, j)
+
     first_layer = True  # True until first layer is output
     logger.debug("initial_layout = %s", layout)
 
@@ -367,7 +522,7 @@ def swap_mapper(circuit_graph, coupling_graph,
         # Attempt to find a permutation for this layer
         success_flag, best_circ, best_d, best_layout, trivial_flag \
             = layer_permutation(layer["partition"], layout,
-                                qubit_subset, coupling_graph, trials)
+                                qubit_subset, coupling_graph, trials, seed)
         logger.debug("swap_mapper: layer %d", i)
         logger.debug("swap_mapper: success_flag=%s,best_d=%s,trivial_flag=%s",
                      success_flag, str(best_d), trivial_flag)
@@ -376,7 +531,7 @@ def swap_mapper(circuit_graph, coupling_graph,
         if not success_flag:
             logger.debug("swap_mapper: failed, layer %d, "
                          "retrying sequentially", i)
-            serial_layerlist = layer["graph"].serial_layers()
+            serial_layerlist = list(layer["graph"].serial_layers())
 
             # Go through each gate in the layer
             for j, serial_layer in enumerate(serial_layerlist):
@@ -384,7 +539,7 @@ def swap_mapper(circuit_graph, coupling_graph,
                 success_flag, best_circ, best_d, best_layout, trivial_flag \
                     = layer_permutation(serial_layer["partition"],
                                         layout, qubit_subset, coupling_graph,
-                                        trials)
+                                        trials, seed)
                 logger.debug("swap_mapper: layer %d, sublayer %d", i, j)
                 logger.debug("swap_mapper: success_flag=%s,best_d=%s,"
                              "trivial_flag=%s",
@@ -409,10 +564,15 @@ def swap_mapper(circuit_graph, coupling_graph,
                 # Update the record of qubit positions for each inner iteration
                 layout = best_layout
                 # Update the QASM
-                openqasm_output += update_qasm(j, first_layer,
-                                               best_layout, best_d,
-                                               best_circ, circuit_graph,
-                                               serial_layerlist)
+                dagcircuit_output.compose_back(
+                    swap_mapper_layer_update(j,
+                                             first_layer,
+                                             best_layout,
+                                             best_d,
+                                             best_circ,
+                                             serial_layerlist,
+                                             coupling_graph),
+                    identity_wire_map)
                 # Update initial layout
                 if first_layer:
                     initial_layout = layout
@@ -423,58 +583,36 @@ def swap_mapper(circuit_graph, coupling_graph,
             layout = best_layout
 
             # Update the QASM
-            openqasm_output += update_qasm(i, first_layer,
-                                           best_layout, best_d,
-                                           best_circ, circuit_graph,
-                                           layerlist)
+            dagcircuit_output.compose_back(
+                swap_mapper_layer_update(i,
+                                         first_layer,
+                                         best_layout,
+                                         best_d,
+                                         best_circ,
+                                         layerlist,
+                                         coupling_graph),
+                identity_wire_map)
             # Update initial layout
             if first_layer:
                 initial_layout = layout
                 first_layer = False
 
+    # This is the final layout that we need to correctly replace
+    # any measurements that needed to be removed before the swap
+    last_layout = layout
+
     # If first_layer is still set, the circuit only has single-qubit gates
     # so we can use the initial layout to output the entire circuit
     if first_layer:
         layout = initial_layout
-        openqasm_output += circuit_graph.qasm(
-            add_swap=True,
-            decls_only=True,
-            aliases=layout)
         for i, layer in enumerate(layerlist):
-            openqasm_output += layer["graph"].qasm(
-                no_decls=True,
-                aliases=layout)
+            dagcircuit_output.compose_back(layer["graph"], layout)
 
     # Parse openqasm_output into DAGCircuit object
-    basis += ",swap"
-    ast = Qasm(data=openqasm_output).parse()
-    u = unroll.Unroller(ast, unroll.DAGBackend(basis.split(",")))
-    return u.execute(), initial_layout
-
-
-def test_trig_solution(theta, phi, lamb, xi, theta1, theta2):
-    r"""Test if arguments are a solution to a system of equations.
-
-    .. math::
-       \cos(\phi+\lambda) \cos(\\theta) = \cos(xi) * \cos(\\theta1+\\theta2)
-
-       \sin(\phi+\lambda) \cos(\\theta) = \sin(xi) * \cos(\\theta1-\\theta2)
-
-       \cos(\phi-\lambda) \sin(\\theta) = \cos(xi) * \sin(\\theta1+\\theta2)
-
-       \sin(\phi-\lambda) \sin(\\theta) = \sin(xi) * \sin(-\\theta1+\\theta2)
-
-    Returns the maximum absolute difference between right and left hand sides.
-    """
-    delta1 = math.cos(phi + lamb) * math.cos(theta) - \
-        math.cos(xi) * math.cos(theta1 + theta2)
-    delta2 = math.sin(phi + lamb) * math.cos(theta) - \
-        math.sin(xi) * math.cos(theta1 - theta2)
-    delta3 = math.cos(phi - lamb) * math.sin(theta) - \
-        math.cos(xi) * math.sin(theta1 + theta2)
-    delta4 = math.sin(phi - lamb) * math.sin(theta) - \
-        math.sin(xi) * math.sin(-theta1 + theta2)
-    return max(map(abs, [delta1, delta2, delta3, delta4]))
+    dag_unrolled = DagUnroller(dagcircuit_output,
+                               DAGBackend(basis.split(",")))
+    dagcircuit_output = dag_unrolled.expand_gates()
+    return dagcircuit_output, initial_layout, last_layout
 
 
 def yzy_to_zyz(xi, theta1, theta2, eps=1e-9):
@@ -484,91 +622,26 @@ def yzy_to_zyz(xi, theta1, theta2, eps=1e-9):
 
     .. math::
 
-    Ry(2*theta1).Rz(2*xi).Ry(2*theta2) = Rz(2*phi).Ry(2*theta).Rz(2*lambda)
+    Ry(theta1).Rz(xi).Ry(theta2) = Rz(phi).Ry(theta).Rz(lambda)
 
-    for theta, phi, and lambda. This is equivalent to solving the system
-    given in the comment for test_solution. Use eps for comparisons with zero.
+    for theta, phi, and lambda.
 
     Return a solution theta, phi, and lambda.
     """
-    solutions = []  # list of potential solutions
-    # Four cases to avoid singularities
-    if abs(math.cos(xi)) < eps / 10:
-        solutions.append((theta2 - theta1, xi, 0.0))
-    elif abs(math.sin(theta1 + theta2)) < eps / 10:
-        phi_minus_lambda = [
-            math.pi / 2,
-            3 * math.pi / 2,
-            math.pi / 2,
-            3 * math.pi / 2]
-        stheta_1 = math.asin(math.sin(xi) * math.sin(-theta1 + theta2))
-        stheta_2 = math.asin(-math.sin(xi) * math.sin(-theta1 + theta2))
-        stheta_3 = math.pi - stheta_1
-        stheta_4 = math.pi - stheta_2
-        stheta = [stheta_1, stheta_2, stheta_3, stheta_4]
-        phi_plus_lambda = list(map(lambda x:
-                                   math.acos(math.cos(theta1 + theta2) *
-                                             math.cos(xi) / math.cos(x)),
-                                   stheta))
-        sphi = [(term[0] + term[1]) / 2 for term in
-                zip(phi_plus_lambda, phi_minus_lambda)]
-        slam = [(term[0] - term[1]) / 2 for term in
-                zip(phi_plus_lambda, phi_minus_lambda)]
-        solutions = list(zip(stheta, sphi, slam))
-    elif abs(math.cos(theta1 + theta2)) < eps / 10:
-        phi_plus_lambda = [
-            math.pi / 2,
-            3 * math.pi / 2,
-            math.pi / 2,
-            3 * math.pi / 2]
-        stheta_1 = math.acos(math.sin(xi) * math.cos(theta1 - theta2))
-        stheta_2 = math.acos(-math.sin(xi) * math.cos(theta1 - theta2))
-        stheta_3 = -stheta_1
-        stheta_4 = -stheta_2
-        stheta = [stheta_1, stheta_2, stheta_3, stheta_4]
-        phi_minus_lambda = list(map(lambda x:
-                                    math.acos(math.sin(theta1 + theta2) *
-                                              math.cos(xi) / math.sin(x)),
-                                    stheta))
-        sphi = [(term[0] + term[1]) / 2 for term in
-                zip(phi_plus_lambda, phi_minus_lambda)]
-        slam = [(term[0] - term[1]) / 2 for term in
-                zip(phi_plus_lambda, phi_minus_lambda)]
-        solutions = list(zip(stheta, sphi, slam))
-    else:
-        phi_plus_lambda = math.atan(math.sin(xi) * math.cos(theta1 - theta2) /
-                                    (math.cos(xi) * math.cos(theta1 + theta2)))
-        phi_minus_lambda = math.atan(math.sin(xi) * math.sin(-theta1 +
-                                                             theta2) /
-                                     (math.cos(xi) * math.sin(theta1 +
-                                                              theta2)))
-        sphi = (phi_plus_lambda + phi_minus_lambda) / 2
-        slam = (phi_plus_lambda - phi_minus_lambda) / 2
-        solutions.append((math.acos(math.cos(xi) * math.cos(theta1 + theta2) /
-                                    math.cos(sphi + slam)), sphi, slam))
-        solutions.append((math.acos(math.cos(xi) * math.cos(theta1 + theta2) /
-                                    math.cos(sphi + slam + math.pi)),
-                          sphi + math.pi / 2,
-                          slam + math.pi / 2))
-        solutions.append((math.acos(math.cos(xi) * math.cos(theta1 + theta2) /
-                                    math.cos(sphi + slam)),
-                          sphi + math.pi / 2, slam - math.pi / 2))
-        solutions.append((math.acos(math.cos(xi) * math.cos(theta1 + theta2) /
-                                    math.cos(sphi + slam + math.pi)),
-                          sphi + math.pi, slam))
-    # Select the first solution with the required accuracy
-    deltas = list(map(lambda x: test_trig_solution(x[0], x[1], x[2],
-                                                   xi, theta1, theta2),
-                      solutions))
-    for delta_sol in zip(deltas, solutions):
-        if delta_sol[0] < eps:
-            return delta_sol[1]
-    logger.debug("xi=%s", xi)
-    logger.debug("theta1=%s", theta1)
-    logger.debug("theta2=%s", theta2)
-    logger.debug("solutions=%s", pprint.pformat(solutions))
-    logger.debug("deltas=%s", pprint.pformat(deltas))
-    assert False, "Error! No solution found. This should not happen."
+    Q = quaternion_from_euler([theta1, xi, theta2], 'yzy')
+    euler = Q.to_zyz()
+    P = quaternion_from_euler(euler, 'zyz')
+    # output order different than rotation order
+    out_angles = (euler[1], euler[0], euler[2])
+    abs_inner = abs(P.data.dot(Q.data))
+    if not np.allclose(abs_inner, 1, eps):
+        logger.debug("xi=%s", xi)
+        logger.debug("theta1=%s", theta1)
+        logger.debug("theta2=%s", theta2)
+        logger.debug("solutions=%s", out_angles)
+        logger.debug("abs_inner=%s", abs_inner)
+        raise MapperError('YZY and ZYZ angles do not give same rotation matrix.')
+    return out_angles
 
 
 def compose_u3(theta1, phi1, lambda1, theta2, phi2, lambda2):
@@ -583,9 +656,10 @@ def compose_u3(theta1, phi1, lambda1, theta2, phi2, lambda2):
     Return theta, phi, lambda.
     """
     # Careful with the factor of two in yzy_to_zyz
-    thetap, phip, lambdap = yzy_to_zyz((lambda1 + phi2) / 2.0,
-                                       theta1 / 2.0, theta2 / 2.0)
-    return (2.0 * thetap, phi1 + 2.0 * phip, lambda2 + 2.0 * lambdap)
+    thetap, phip, lambdap = yzy_to_zyz((lambda1 + phi2),
+                                       theta1, theta2)
+    (theta, phi, lamb) = (thetap, phi1 + phip, lambda2 + lambdap)
+    return (theta, phi, lamb)
 
 
 def cx_cancellation(circuit):
@@ -597,8 +671,8 @@ def cx_cancellation(circuit):
         chunk = []
         for i in range(len(run) - 1):
             chunk.append(run[i])
-            qargs0 = circuit.multi_graph.node[run[i]]["qargs"]
-            qargs1 = circuit.multi_graph.node[run[i + 1]]["qargs"]
+            qargs0 = circuit.multi_graph.node[run[i]]["op"].qargs
+            qargs1 = circuit.multi_graph.node[run[i + 1]]["op"].qargs
             if qargs0 != qargs1:
                 partition.append(chunk)
                 chunk = []
@@ -612,6 +686,7 @@ def cx_cancellation(circuit):
             else:
                 for n in chunk[1:]:
                     circuit._remove_op_node(n)
+    return circuit
 
 
 def optimize_1q_gates(circuit):
@@ -620,46 +695,45 @@ def optimize_1q_gates(circuit):
     Return a new circuit that has been optimized.
     """
     qx_basis = ["u1", "u2", "u3", "cx", "id"]
-    urlr = unroll.Unroller(Qasm(data=circuit.qasm(qeflag=True)).parse(),
-                           unroll.DAGBackend(qx_basis))
-    unrolled = urlr.execute()
+    dag_unroller = DagUnroller(circuit, DAGBackend(qx_basis))
+    unrolled = dag_unroller.expand_gates()
 
     runs = unrolled.collect_runs(["u1", "u2", "u3", "id"])
     for run in runs:
-        qname = unrolled.multi_graph.node[run[0]]["qargs"][0]
+        run_qarg = unrolled.multi_graph.node[run[0]]["qargs"][0]
         right_name = "u1"
-        right_parameters = (0.0, 0.0, 0.0)  # (theta, phi, lambda)
-        for node in run:
-            nd = unrolled.multi_graph.node[node]
-            assert nd["condition"] is None, "internal error"
-            assert len(nd["qargs"]) == 1, "internal error"
-            assert nd["qargs"][0] == qname, "internal error"
+        right_parameters = (N(0), N(0), N(0))  # (theta, phi, lambda)
+        for current_node in run:
+            nd = unrolled.multi_graph.node[current_node]
             left_name = nd["name"]
-            assert left_name in ["u1", "u2", "u3", "id"], "internal error"
+            if (nd["condition"] is not None
+                    or len(nd["qargs"]) != 1
+                    or nd["qargs"][0] != run_qarg
+                    or left_name not in ["u1", "u2", "u3", "id"]):
+                raise MapperError("internal error")
             if left_name == "u1":
-                left_parameters = (0.0, 0.0, float(nd["params"][0]))
+                left_parameters = (N(0), N(0), nd["op"].param[0])
             elif left_name == "u2":
-                left_parameters = (math.pi / 2, float(nd["params"][0]),
-                                   float(nd["params"][1]))
+                left_parameters = (sympy.pi / 2, nd["op"].param[0], nd["op"].param[1])
             elif left_name == "u3":
-                left_parameters = tuple(map(float, nd["params"]))
+                left_parameters = tuple(nd["op"].param)
             else:
                 left_name = "u1"  # replace id with u1
-                left_parameters = (0.0, 0.0, 0.0)
+                left_parameters = (N(0), N(0), N(0))
             # Compose gates
             name_tuple = (left_name, right_name)
             if name_tuple == ("u1", "u1"):
                 # u1(lambda1) * u1(lambda2) = u1(lambda1 + lambda2)
-                right_parameters = (0.0, 0.0, right_parameters[2] +
+                right_parameters = (N(0), N(0), right_parameters[2] +
                                     left_parameters[2])
             elif name_tuple == ("u1", "u2"):
                 # u1(lambda1) * u2(phi2, lambda2) = u2(phi2 + lambda1, lambda2)
-                right_parameters = (math.pi / 2, right_parameters[1] +
+                right_parameters = (sympy.pi / 2, right_parameters[1] +
                                     left_parameters[2], right_parameters[2])
             elif name_tuple == ("u2", "u1"):
                 # u2(phi1, lambda1) * u1(lambda2) = u2(phi1, lambda1 + lambda2)
                 right_name = "u2"
-                right_parameters = (math.pi / 2, left_parameters[1],
+                right_parameters = (sympy.pi / 2, left_parameters[1],
                                     right_parameters[2] + left_parameters[2])
             elif name_tuple == ("u1", "u3"):
                 # u1(lambda1) * u3(theta2, phi2, lambda2) =
@@ -678,68 +752,146 @@ def optimize_1q_gates(circuit):
                 # u2(phi1, lambda1) * u2(phi2, lambda2) =
                 #    u3(pi - lambda1 - phi2, phi1 + pi/2, lambda2 + pi/2)
                 right_name = "u3"
-                right_parameters = (math.pi - left_parameters[2] -
+                right_parameters = (sympy.pi - left_parameters[2] -
                                     right_parameters[1], left_parameters[1] +
-                                    math.pi / 2, right_parameters[2] +
-                                    math.pi / 2)
+                                    sympy.pi / 2, right_parameters[2] +
+                                    sympy.pi / 2)
+            elif name_tuple[1] == "nop":
+                right_name = left_name
+                right_parameters = left_parameters
             else:
                 # For composing u3's or u2's with u3's, use
                 # u2(phi, lambda) = u3(pi/2, phi, lambda)
                 # together with the qiskit.mapper.compose_u3 method.
                 right_name = "u3"
+                # Evaluate the symbolic expressions for efficiency
+                left_parameters = tuple(map(lambda x: x.evalf(), list(left_parameters)))
+                right_parameters = tuple(map(lambda x: x.evalf(), list(right_parameters)))
                 right_parameters = compose_u3(left_parameters[0],
                                               left_parameters[1],
                                               left_parameters[2],
                                               right_parameters[0],
                                               right_parameters[1],
                                               right_parameters[2])
-            # Here down, when we simplify, we add f(theta) to lambda to correct
-            # the global phase when f(theta) is 2*pi. This isn't necessary but
-            # the other steps preserve the global phase, so we continue.
-            epsilon = 1e-9  # for comparison with zero
+                # Why evalf()? This program:
+                #   OPENQASM 2.0;
+                #   include "qelib1.inc";
+                #   qreg q[2];
+                #   creg c[2];
+                #   u3(0.518016983430947*pi,1.37051598592907*pi,1.36816383603222*pi) q[0];
+                #   u3(1.69867232277986*pi,0.371448347747471*pi,0.461117217930936*pi) q[0];
+                #   u3(0.294319836336836*pi,0.450325871124225*pi,1.46804720442555*pi) q[0];
+                #   measure q -> c;
+                # took >630 seconds (did not complete) to optimize without
+                # calling evalf() at all, 19 seconds to optimize calling
+                # evalf() AFTER compose_u3, and 1 second to optimize
+                # calling evalf() BEFORE compose_u3.
+            # 1. Here down, when we simplify, we add f(theta) to lambda to
+            # correct the global phase when f(theta) is 2*pi. This isn't
+            # necessary but the other steps preserve the global phase, so
+            # we continue in that manner.
+            # 2. The final step will remove Z rotations by 2*pi.
+            # 3. Note that is_zero is true only if the expression is exactly
+            # zero. If the input expressions have already been evaluated
+            # then these final simplifications will not occur.
+            # TODO After we refactor, we should have separate passes for
+            # exact and approximate rewriting.
+
             # Y rotation is 0 mod 2*pi, so the gate is a u1
-            if abs(right_parameters[0] % 2.0 * math.pi) < epsilon \
-               and right_name != "u1":
+            if (right_parameters[0] % (2 * sympy.pi)).is_zero \
+                    and right_name != "u1":
                 right_name = "u1"
-                right_parameters = (0.0, 0.0, right_parameters[1] +
+                right_parameters = (0, 0, right_parameters[1] +
                                     right_parameters[2] +
                                     right_parameters[0])
             # Y rotation is pi/2 or -pi/2 mod 2*pi, so the gate is a u2
             if right_name == "u3":
                 # theta = pi/2 + 2*k*pi
-                if abs((right_parameters[0] - math.pi / 2) % 2.0 * math.pi) \
-                   < epsilon:
+                if ((right_parameters[0] - sympy.pi / 2) % (2 * sympy.pi)).is_zero:
                     right_name = "u2"
-                    right_parameters = (math.pi / 2, right_parameters[1],
+                    right_parameters = (sympy.pi / 2, right_parameters[1],
                                         right_parameters[2] +
-                                        (right_parameters[0] - math.pi / 2))
+                                        (right_parameters[0] - sympy.pi / 2))
                 # theta = -pi/2 + 2*k*pi
-                if abs((right_parameters[0] + math.pi / 2) % 2.0 * math.pi) \
-                   < epsilon:
+                if ((right_parameters[0] + sympy.pi / 2) % (2 * sympy.pi)).is_zero:
                     right_name = "u2"
-                    right_parameters = (math.pi / 2, right_parameters[1] +
-                                        math.pi, right_parameters[2] -
-                                        math.pi + (right_parameters[0] +
-                                                   math.pi / 2))
-            # u1 and lambda is 0 mod 4*pi so gate is nop
-            if right_name == "u1" and \
-               abs(right_parameters[2] % 4.0 * math.pi) < epsilon:
+                    right_parameters = (sympy.pi / 2, right_parameters[1] +
+                                        sympy.pi, right_parameters[2] -
+                                        sympy.pi + (right_parameters[0] +
+                                                    sympy.pi / 2))
+            # u1 and lambda is 0 mod 2*pi so gate is nop (up to a global phase)
+            if right_name == "u1" and (right_parameters[2] % (2 * sympy.pi)).is_zero:
                 right_name = "nop"
+            # Simplify the symbolic parameters
+            right_parameters = tuple(map(sympy.simplify, list(right_parameters)))
         # Replace the data of the first node in the run
-        new_params = []
+        new_op = Instruction("", [], [], [])
         if right_name == "u1":
-            new_params.append(right_parameters[2])
+            new_op = U1Gate(right_parameters[2], run_qarg)
         if right_name == "u2":
-            new_params = [right_parameters[1], right_parameters[2]]
+            new_op = U2Gate(right_parameters[1], right_parameters[2], run_qarg)
         if right_name == "u3":
-            new_params = list(right_parameters)
-        nx.set_node_attributes(unrolled.multi_graph, 'name',
-                               {run[0]: right_name})
-        nx.set_node_attributes(unrolled.multi_graph, 'params',
-                               {run[0]: tuple(map(str, new_params))})
+            new_op = U3Gate(*right_parameters, run_qarg)
+
+        nx.set_node_attributes(unrolled.multi_graph, name='name',
+                               values={run[0]: right_name})
+        nx.set_node_attributes(unrolled.multi_graph, name='op',
+                               values={run[0]: new_op})
         # Delete the other nodes in the run
-        for node in run[1:]:
-            unrolled._remove_op_node(node)
+        for current_node in run[1:]:
+            unrolled._remove_op_node(current_node)
         if right_name == "nop":
             unrolled._remove_op_node(run[0])
     return unrolled
+
+
+def remove_last_measurements(dag_circuit, perform_remove=True):
+    """Removes all measurements that occur as the last operation
+    on a given qubit for a DAG circuit.  Measurements that are followed by
+    additional gates are untouched.
+
+    This operation is done in-place on the input DAG circuit if perform_pop=True.
+
+    Parameters:
+        dag_circuit (DAGCircuit): DAG circuit.
+        perform_remove (bool): Whether to perform removal, or just return node list.
+
+    Returns:
+        list: List of all measurement node indices (int) that were removed.
+    """
+    removed_meas = []
+    try:
+        meas_nodes = dag_circuit.get_named_nodes('measure')
+    except DAGCircuitError:
+        return removed_meas
+
+    for idx in meas_nodes:
+        _, succ_map = dag_circuit._make_pred_succ_maps(idx)
+        if len(succ_map) == 2 and all([dag_circuit.multi_graph.node[n]["type"] == "out"
+                                       for n in succ_map.values()]):
+            # All succesors of the measurement are outputs, one for qubit and one for cbit
+            # (As opposed to more gates being applied), and it is safe to remove the
+            # measurement node and add it back after the swap mapper is done.
+            removed_meas.append(dag_circuit.multi_graph.node[idx])
+            if perform_remove:
+                dag_circuit._remove_op_node(idx)
+    return removed_meas
+
+
+def return_last_measurements(dag_circuit, removed_meas, final_layout):
+    """Returns the measurements to a quantum circuit, removed by
+    `remove_last_measurements` after the swap mapper is finished.
+
+    This operation is done in-place on the input DAG circuit.
+
+    Parameters:
+        dag_circuit (DAGCircuit): DAG circuit.
+        removed_meas (list[int]): List of measurements previously removed.
+        final_layout (dict): Qubit layout after swap mapping.
+    """
+    if any(removed_meas) and 'measure' not in dag_circuit.basis.keys():
+        dag_circuit.add_basis_element("measure", 1, 1, 0)
+    for meas in removed_meas:
+        new_q = final_layout[meas['op'].qargs[0]]
+        new_c = meas['op'].cargs[0]
+        dag_circuit.apply_operation_back(Measure(new_q, new_c))

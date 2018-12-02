@@ -1,30 +1,23 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2017 IBM RESEARCH. All Rights Reserved.
+# Copyright 2017, IBM.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# =============================================================================
+# This source code is licensed under the Apache License, Version 2.0 found in
+# the LICENSE.txt file in the root directory of this source tree.
+
+# pylint: disable=invalid-name
 
 """
 One-pulse single-qubit gate.
 """
-import math
-from qiskit import QuantumRegister
-from qiskit import QuantumCircuit
 from qiskit import Gate
 from qiskit import InstructionSet
-from qiskit import CompositeGate
-from qiskit.extensions.standard import header
+from qiskit import QuantumCircuit
+from qiskit import QuantumRegister
+from qiskit.dagcircuit import DAGCircuit
+from qiskit.qasm import pi
+from qiskit.extensions.standard import header  # pylint: disable=unused-import
+from qiskit.extensions.standard.ubase import UBase
 
 
 class U2Gate(Gate):
@@ -32,16 +25,20 @@ class U2Gate(Gate):
 
     def __init__(self, phi, lam, qubit, circ=None):
         """Create new one-pulse single-qubit gate."""
-        super(U2Gate, self).__init__("u2", [phi, lam], [qubit], circ)
+        super().__init__("u2", [phi, lam], [qubit], circ)
+        self._define_decompositions()
 
-    def qasm(self):
-        """Return OPENQASM string."""
-        qubit = self.arg[0]
-        phi = self.param[0]
-        lam = self.param[1]
-        return self._qasmif("u2(%.15f,%.15f) %s[%d];" % (phi, lam,
-                                                         qubit[0].name,
-                                                         qubit[1]))
+    def _define_decompositions(self):
+        decomposition = DAGCircuit()
+        q = QuantumRegister(1, "q")
+        decomposition.add_qreg(q)
+        decomposition.add_basis_element("U", 1, 0, 3)
+        rule = [
+            UBase(pi/2, self.param[0], self.param[1], q[0])
+        ]
+        for inst in rule:
+            decomposition.apply_operation_back(inst)
+        self._decompositions = [decomposition]
 
     def inverse(self):
         """Invert this gate.
@@ -49,26 +46,26 @@ class U2Gate(Gate):
         u2(phi,lamb)^dagger = u2(-lamb-pi,-phi+pi)
         """
         phi = self.param[0]
-        self.param[0] = -self.param[1] - math.pi
-        self.param[1] = -phi + math.pi
+        self.param[0] = -self.param[1] - pi
+        self.param[1] = -phi + pi
+        self._define_decompositions()
         return self
 
     def reapply(self, circ):
         """Reapply this gate to corresponding qubits in circ."""
-        self._modifiers(circ.u2(self.param[0], self.param[1], self.arg[0]))
+        self._modifiers(circ.u2(self.param[0], self.param[1], self.qargs[0]))
 
 
 def u2(self, phi, lam, q):
     """Apply u2 to q."""
     if isinstance(q, QuantumRegister):
-        gs = InstructionSet()
+        instructions = InstructionSet()
         for j in range(q.size):
-            gs.add(self.u2(phi, lam, (q, j)))
-        return gs
-    else:
-        self._check_qubit(q)
-        return self._attach(U2Gate(phi, lam, q, self))
+            instructions.add(self.u2(phi, lam, (q, j)))
+        return instructions
+
+    self._check_qubit(q)
+    return self._attach(U2Gate(phi, lam, q, self))
 
 
 QuantumCircuit.u2 = u2
-CompositeGate.u2 = u2

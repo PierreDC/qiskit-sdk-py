@@ -1,18 +1,9 @@
-# Copyright 2017 IBM RESEARCH. All Rights Reserved.
+# Copyright 2017, IBM.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# =============================================================================
-.PHONY: env env-dev lint test run doc
+# This source code is licensed under the Apache License, Version 2.0 found in
+# the LICENSE.txt file in the root directory of this source tree.
+
+.PHONY: env lint test doc test_record test_mock
 
 # Dependencies need to be installed on the Anaconda virtual environment.
 env:
@@ -23,26 +14,56 @@ env:
 		bash -c "source activate QISKitenv;pip install -r requirements.txt"; \
 	fi;
 
-run:
-	bash -c "source activate QISKitenv;cd examples; cd jupyter;jupyter notebook"
-
 # Ignoring generated ones with .py extension.
 lint:
-	pylint qiskit test
+	pylint -rn qiskit test
 
-# TODO: Uncomment when the lint one passes.
-# test: lint
+style:
+	pycodestyle --max-line-length=100 qiskit test
+
+# Use the -s (starting directory) flag for "unittest discover" is necessary,
+# otherwise the QuantumCircuit header will be modified during the discovery.
 test:
-	python3 -m unittest discover -v
+	stestr run --concurrency 2
+
+test_mock:
+	env QISKIT_TESTS=mock_online stestr run --concurrency 2
+
+test_recording:
+	-rm test/cassettes/*
+	env QISKIT_TESTS=rec stestr run --concurrency 2
 
 profile:
-	python3 -m unittest discover -p "profile*.py" -v
+	stestr run "profile*" --concurrency 2
+
+coverage:
+	PYTHON="coverage3 run --source qiskit --parallel-mode" stestr run --concurrency 2
+	coverage3 combine
+	coverage3 report
 
 doc:
 	export PYTHONPATH=$(PWD); \
-	better-apidoc -f -o doc/_autodoc -d 5 -e -t doc/_templates/better-apidoc qiskit qiskit/tools "qiskit/extensions/standard/[a-z]*"; \
-	sphinx-autogen -t doc/_templates doc/_autodoc/*; \
-	make -C doc html
+	for LANGUAGE in "." "de" "ja"; do \
+		better-apidoc -f -o doc/$$LANGUAGE/_autodoc --no-toc --private --maxdepth=5 --separate --templates=doc/_templates/better-apidoc qiskit qiskit/tools qiskit/wrapper/jupyter "qiskit/extensions/standard/[a-z]*"; \
+		sphinx-autogen -t doc/_templates doc/$$LANGUAGE/_autodoc/*; \
+		make -C doc -e BUILDDIR="_build/$$LANGUAGE" -e SOURCEDIR="./$$LANGUAGE" html; \
+	done
 
-clean:
+sim:
+	make -C src/qasm-simulator-cpp/src clean
+	make -C src/qasm-simulator-cpp/src
+
+# Build dependencies for the simulator target
+depend:
+	make -C src/qasm-simulator-cpp depend
+
+coverage_erase:
+	coverage erase
+
+clean: coverage_erase
 	make -C doc clean
+	make -C doc -e BUILDDIR="_build/de" -e SOURCEDIR="./de" clean
+	make -C doc -e BUILDDIR="_build/ja" -e SOURCEDIR="./ja" clean
+	make -C src/qasm-simulator-cpp/src clean
+	rm -f test/python/test_latex_drawer.tex test/python/test_qasm_python_simulator.pdf \
+		test/python/test_save.json test/python/test_teleport.tex

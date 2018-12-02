@@ -3,7 +3,7 @@
 # Author: Juan Gomez
 
 # Please provide a valid username and password to connect to PyPi for uploading
-# the QISKit SDK distributable packaged
+# the Qiskit SDK distributable packaged
 USERNAME=""
 PASSWORD=""
 
@@ -12,7 +12,7 @@ PASSWORD=""
 usage(){
     echo "Usage:"
     echo "$0 [OPTION]"
-    echo "Helper script to create and upload QISKit SDK distributable package"
+    echo "Helper script to create and upload Qiskit SDK distributable package"
     echo "to PyPi severs."
     echo ""
     echo "Options:"
@@ -134,9 +134,11 @@ echo -n "Clobbering build..."
 rm -rf qiskit.egg-info build dist
 echo -e "[OK]"
 
+export USER_FLAGS="-static"
+echo "Setting USER_FLAGS env variable for C++ compilation to: $USER_FLAGS"
 echo -n "Building distributable package..."
 # Let's build the wheel package
-python setup.py sdist bdist_wheel &>> $self.log
+python setup.py sdist bdist_wheel -p manylinux1_x86_64 &>> $self.log
 if [ $? != 0 ]
 then
     echo -e "[ERROR]"
